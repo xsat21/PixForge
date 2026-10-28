@@ -44,7 +44,25 @@ jobs:
           curl --fail -I http://localhost:8080/ | grep -i "connect-src 'none'"
           asset=$(grep -oE '/assets/[^" ]+\.js' /tmp/pixforge.html | head -n1)
           test -n "$asset"
+          curl --fail http://localhost:8080/favicon.svg -o /dev/null
+          curl --fail http://localhost:8080/licenses/libheif.txt -o /dev/null
           curl --fail "http://localhost:8080$asset" -o /dev/null
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/)" = '403'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Browser regression tests under production CSP
+        run: npm run test:e2e -- --project=chromium --project=mobile-chromium
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: docker-browser-test-results
+          path: test-results/
+          retention-days: 7
       - run: docker compose logs && docker compose down
         if: always()

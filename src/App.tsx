@@ -31,6 +31,10 @@ import {
   validateSettings,
 } from './image'
 import type { Format, Settings } from './image'
+import { inputAccept } from './formats'
+import { avifSupport } from './capabilities'
+import type { AvifSupport } from './capabilities'
+import { checkHeicSupport } from './heic-decoder'
 
 type Result = Awaited<ReturnType<typeof processImage>> & { url: string }
 type Item = {
@@ -45,6 +49,11 @@ const formatOptions: { value: Format; label: string; description: string }[] = [
   { value: 'image/webp', label: 'WebP', description: 'Small & versatile' },
   { value: 'image/jpeg', label: 'JPG', description: 'Best for photos' },
   { value: 'image/png', label: 'PNG', description: 'Lossless output' },
+  {
+    value: 'image/avif',
+    label: 'AVIF',
+    description: 'Browser-dependent output',
+  },
 ]
 
 function download(url: string, name: string) {
@@ -63,6 +72,11 @@ export default function App() {
   const [zipping, setZipping] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [notice, setNotice] = useState('')
+  const [capabilities, setCapabilities] = useState<{
+    avif: AvifSupport
+    heic: boolean
+  } | null>(null)
+  const processingAbort = useRef<AbortController | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const nextId = useRef(0)
   const itemsRef = useRef(items)
@@ -72,9 +86,17 @@ export default function App() {
 
   useEffect(() => {
     mounted.current = true
+    const controller = new AbortController()
+    processingAbort.current = controller
+    void Promise.all([avifSupport(), checkHeicSupport(controller.signal)]).then(
+      ([avif, heic]) => {
+        if (!controller.signal.aborted) setCapabilities({ avif, heic })
+      },
+    )
     const activeUrls = urls.current
     return () => {
       mounted.current = false
+      controller.abort()
       activeUrls.forEach((url) => URL.revokeObjectURL(url))
       activeUrls.clear()
     }
@@ -164,7 +186,11 @@ export default function App() {
         ),
       )
       try {
-        const result = await processImage(item.file, settings)
+        const result = await processImage(
+          item.file,
+          settings,
+          processingAbort.current?.signal,
+        )
         if (!mounted.current) break
         const url = URL.createObjectURL(result.blob)
         urls.current.add(url)
@@ -255,7 +281,7 @@ export default function App() {
           <span className="brand-mark">
             <Layers3 size={21} strokeWidth={2.5} />
           </span>
-          PixForge<span className="version">v0.1.0</span>
+          PixForge<span className="version">v0.2.0</span>
         </a>
         <div className="header-note">
           <span className="status-dot" />
@@ -304,7 +330,7 @@ export default function App() {
                 ref={inputRef}
                 id="file-input"
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept={inputAccept}
                 multiple
                 onChange={onInput}
                 disabled={disabled}
@@ -328,8 +354,8 @@ export default function App() {
                 Browse files
               </button>
               <div className="upload-meta">
-                JPG, PNG, WebP <span>·</span> Up to 40 MB each <span>·</span> 50
-                images
+                JPG, PNG, WebP, AVIF, HEIC/HEIF <span>·</span> Up to 40 MB each{' '}
+                <span>·</span> 50 images
               </div>
             </div>
 
@@ -539,6 +565,19 @@ export default function App() {
                       className={`format-option ${settings.format === option.value ? 'selected' : ''}`}
                       onClick={() => changeSettings({ format: option.value })}
                       aria-pressed={settings.format === option.value}
+                      disabled={
+                        option.value === 'image/avif' &&
+                        capabilities?.avif.encode !== true
+                      }
+                      title={
+                        option.value === 'image/avif'
+                          ? capabilities?.avif.encode
+                            ? 'AVIF output supported by this browser'
+                            : capabilities
+                              ? 'AVIF output is not supported by this browser.'
+                              : 'Checking AVIF output support…'
+                          : undefined
+                      }
                     >
                       {option.label}
                       {settings.format === option.value && (
@@ -558,6 +597,24 @@ export default function App() {
                     : settings.format === 'image/jpeg'
                       ? '. Transparency becomes white.'
                       : '. Preserves transparency.'}
+                </p>
+                <p className="setting-hint format-support" role="status">
+                  {!capabilities ? (
+                    'Checking AVIF and HEIC support…'
+                  ) : (
+                    <>
+                      {capabilities.avif.decode
+                        ? 'AVIF input supported. '
+                        : 'AVIF decoding is not supported by this browser. '}
+                      {capabilities.avif.encode
+                        ? 'AVIF output supported.'
+                        : 'AVIF output is not supported by this browser.'}
+                      <br />
+                      {capabilities.heic
+                        ? 'HEIC/HEIF input supported locally.'
+                        : 'HEIC decoding is unavailable in this environment.'}
+                    </>
+                  )}
                 </p>
               </div>
               <div className="setting-section quality-section">
@@ -744,14 +801,15 @@ export default function App() {
             Good to know <ChevronDown size={14} />
           </summary>
           <p>
-            JPG, PNG, and WebP inputs only. Animated images are flattened to one
-            frame. Re-encoding removes most metadata; outputs are intended for
-            screen use, not color-critical print. Smaller files aren’t
-            guaranteed, especially with PNG. Quality is browser-dependent.
-            Maximum: 50 images, 200 MB per batch, 40 megapixels and 16,384
-            pixels per side. Large batches and ZIP downloads need available
-            device memory. Changing settings clears previous results so you can
-            process again.
+            JPG, PNG, WebP, AVIF, and HEIC/HEIF inputs. AVIF support depends on
+            your browser. HEIC/HEIF uses a local decoder and its primary image;
+            animated inputs are flattened to one frame. Re-encoding removes most
+            metadata; outputs are intended for screen use, not color-critical
+            print. Smaller files aren’t guaranteed, especially with PNG. Quality
+            is browser-dependent. Maximum: 50 images, 200 MB per batch, 40
+            megapixels and 16,384 pixels per side. Large batches and ZIP
+            downloads need available device memory. Changing settings clears
+            previous results so you can process again.
           </p>
         </details>
       </main>
