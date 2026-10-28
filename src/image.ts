@@ -1,4 +1,21 @@
-export type Format = 'image/jpeg' | 'image/png' | 'image/webp'
+import { detectFileFormat, inputFormat, outputFormats } from './formats'
+import type { FileIdentity, Format } from './formats'
+import { assertImageDimensions, MAX_DIMENSION, MAX_FILE_BYTES } from './limits'
+import {
+  avifSupport,
+  AVIF_DECODE_UNAVAILABLE,
+  AVIF_ENCODE_UNAVAILABLE,
+  encodeCanvas,
+} from './capabilities'
+import { decodeHeic } from './heic-decoder'
+export type { Format } from './formats'
+export {
+  MAX_FILES,
+  MAX_BATCH_BYTES,
+  MAX_DIMENSION,
+  MAX_FILE_BYTES,
+  MAX_PIXELS,
+} from './limits'
 export type Settings = {
   format: Format
   quality: number
@@ -7,11 +24,6 @@ export type Settings = {
   lock: boolean
 }
 
-export const MAX_FILES = 50
-export const MAX_FILE_BYTES = 40 * 1024 * 1024
-export const MAX_BATCH_BYTES = 200 * 1024 * 1024
-export const MAX_PIXELS = 40_000_000
-export const MAX_DIMENSION = 16_384
 export const defaultSettings: Settings = {
   format: 'image/webp',
   quality: 80,
@@ -19,10 +31,12 @@ export const defaultSettings: Settings = {
   height: '',
   lock: true,
 }
-const formats = new Set(['image/jpeg', 'image/png', 'image/webp'])
 
-export function validateFile(file: Pick<File, 'type' | 'size'>): string | null {
-  if (!formats.has(file.type)) return 'Choose a JPG, PNG, or WebP image.'
+export function validateFile(
+  file: FileIdentity & { size: number },
+): string | null {
+  if (!inputFormat(file))
+    return 'Choose a JPG, PNG, or WebP image, or an AVIF, HEIC, or HEIF file.'
   if (!file.size) return 'This file is empty.'
   if (file.size > MAX_FILE_BYTES) return 'Images must be 40 MB or smaller.'
   return null
@@ -78,7 +92,7 @@ export function validateSettings(settings: Settings): string | null {
       settings.quality > 100
     )
       throw new Error('Quality must be between 1 and 100.')
-    if (!formats.has(settings.format))
+    if (!outputFormats.has(settings.format))
       throw new Error('Unsupported output format.')
     return null
   } catch (error) {
@@ -91,6 +105,7 @@ export function outputName(name: string, format: Format): string {
     'image/jpeg': 'jpg',
     'image/png': 'png',
     'image/webp': 'webp',
+    'image/avif': 'avif',
   }[format]
   const stem =
     (name.split(/[\\/]/).pop() || 'image')
@@ -120,26 +135,44 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
-export async function processImage(file: File, settings: Settings) {
+export async function processImage(
+  file: File,
+  settings: Settings,
+  signal?: AbortSignal,
+) {
   const invalid = validateFile(file) ?? validateSettings(settings)
   if (invalid) throw new Error(invalid)
-  let bitmap: ImageBitmap
-  try {
-    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
-  } catch {
+  if (settings.format === 'image/avif' && !(await avifSupport()).encode)
+    throw new Error(AVIF_ENCODE_UNAVAILABLE)
+  const format = detectFileFormat(
+    new Uint8Array(await file.slice(0, 256).arrayBuffer()),
+  )
+  if (!format)
     throw new Error(
       'This image could not be decoded. It may be damaged or unsupported.',
     )
-  }
-  try {
-    if (
-      bitmap.width * bitmap.height > MAX_PIXELS ||
-      Math.max(bitmap.width, bitmap.height) > MAX_DIMENSION
-    ) {
+  if (format === 'image/avif' && !(await avifSupport()).decode)
+    throw new Error(AVIF_DECODE_UNAVAILABLE)
+  let bitmap: ImageBitmap
+  if (format === 'image/heic') {
+    bitmap = await decodeHeic(file, signal)
+  } else {
+    try {
+      bitmap = await createImageBitmap(file.slice(0, file.size, format), {
+        imageOrientation: 'from-image',
+      })
+    } catch {
       throw new Error(
-        'Image exceeds the 40 megapixel or 16,384 pixel side limit.',
+        format === 'image/avif'
+          ? 'This AVIF image could not be decoded. It may be damaged or use an unsupported AVIF variant.'
+          : 'This image could not be decoded. It may be damaged or unsupported.',
       )
     }
+  }
+  try {
+    if (signal?.aborted)
+      throw new DOMException('Processing cancelled.', 'AbortError')
+    assertImageDimensions(bitmap.width, bitmap.height)
     const { width, height } = outputDimensions(
       bitmap.width,
       bitmap.height,
@@ -159,22 +192,11 @@ export async function processImage(file: File, settings: Settings) {
         ctx.fillRect(0, 0, width, height)
       }
       ctx.drawImage(bitmap, 0, 0, width, height)
-      const blob = await new Promise<Blob>((resolve, reject) => {
-        canvas.toBlob(
-          (result) =>
-            result
-              ? resolve(result)
-              : reject(
-                  new Error('Image encoding failed. Try smaller dimensions.'),
-                ),
-          settings.format,
-          settings.quality / 100,
-        )
-      })
-      if (blob.type !== settings.format)
-        throw new Error(
-          'Your browser does not support encoding this format. Try PNG or JPG.',
-        )
+      const blob = await encodeCanvas(
+        canvas,
+        settings.format,
+        settings.quality / 100,
+      )
       return {
         blob,
         width,

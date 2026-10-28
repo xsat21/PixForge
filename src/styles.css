@@ -235,6 +235,7 @@ button:not(:disabled):hover {
   box-shadow: 0 2px 2px #0002;
 }
 .upload-meta {
+  flex-wrap: wrap;
   font-size: 10px;
   color: #858e99;
   display: flex;
